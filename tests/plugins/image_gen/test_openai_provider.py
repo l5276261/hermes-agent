@@ -120,6 +120,54 @@ class TestModelResolution:
         assert model_id == "gpt-image-2-high"
         assert meta["quality"] == "high"
 
+    def test_api_model_defaults_to_gpt_image_2(self):
+        assert openai_plugin._resolve_api_model() == "gpt-image-2"
+
+    def test_api_model_env_override(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_IMAGE_API_MODEL", "image-2")
+        assert openai_plugin._resolve_api_model() == "image-2"
+
+    def test_api_model_config_override(self, tmp_path):
+        import yaml
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai": {"api_model": "image-2"}}})
+        )
+        assert openai_plugin._resolve_api_model() == "image-2"
+
+    def test_base_url_config_override(self, tmp_path):
+        import yaml
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"image_gen": {"openai": {"base_url": "http://127.0.0.1:8317/v1/"}}}
+            )
+        )
+        assert openai_plugin._resolve_base_url() == "http://127.0.0.1:8317/v1"
+
+    def test_base_url_openai_env_fallback(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8317/v1/")
+        assert openai_plugin._resolve_base_url() == "http://127.0.0.1:8317/v1"
+
+    def test_api_mode_defaults_to_images(self):
+        assert openai_plugin._resolve_api_mode() == "images"
+
+    def test_api_mode_env_responses(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_IMAGE_API_MODE", "responses")
+        assert openai_plugin._resolve_api_mode() == "responses"
+
+    def test_api_mode_config_responses(self, tmp_path):
+        import yaml
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai": {"api_mode": "responses"}}})
+        )
+        assert openai_plugin._resolve_api_mode() == "responses"
+
+    def test_responses_model_config_override(self, tmp_path):
+        import yaml
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"image_gen": {"openai": {"responses_model": "gpt-5.5"}}})
+        )
+        assert openai_plugin._resolve_responses_model() == "gpt-5.5"
+
 
 # ── Generate ────────────────────────────────────────────────────────────────
 
@@ -162,6 +210,71 @@ class TestGenerate:
         assert call_kwargs["size"] == "1536x1024"
         # gpt-image-2 rejects response_format — we must NOT send it.
         assert "response_format" not in call_kwargs
+        assert result["api_model"] == "gpt-image-2"
+
+    def test_generate_uses_configured_api_model_and_base_url(self, provider, monkeypatch):
+        monkeypatch.setenv("OPENAI_IMAGE_API_MODEL", "image-2")
+        monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "http://127.0.0.1:8317/v1/")
+        fake_client = MagicMock()
+        fake_client.images.generate.return_value = _fake_response(b64=_b64_png())
+
+        with _patched_openai(fake_client) as patched:
+            result = provider.generate("a cat")
+
+        assert result["success"] is True
+        assert result["api_model"] == "image-2"
+        assert fake_client.images.generate.call_args.kwargs["model"] == "image-2"
+        patched["openai"].OpenAI.assert_called_once_with(
+            base_url="http://127.0.0.1:8317/v1"
+        )
+
+    def test_generate_via_responses_saves_b64(self, provider, monkeypatch):
+        monkeypatch.setenv("OPENAI_IMAGE_API_MODE", "responses")
+        monkeypatch.setenv("OPENAI_IMAGE_API_MODEL", "image-2")
+        monkeypatch.setenv("OPENAI_IMAGE_RESPONSES_MODEL", "gpt-5.5")
+        monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "http://127.0.0.1:8317/v1/")
+        captured = {}
+
+        def _collect(**kwargs):
+            captured.update(kwargs)
+            return _b64_png()
+
+        monkeypatch.setattr(openai_plugin, "_collect_responses_image_b64", _collect)
+
+        result = provider.generate("a cat", aspect_ratio="square")
+
+        assert result["success"] is True
+        assert result["api_mode"] == "responses"
+        assert result["api_model"] == "image-2"
+        assert result["responses_model"] == "gpt-5.5"
+        assert captured["base_url"] == "http://127.0.0.1:8317/v1"
+        assert captured["api_model"] == "image-2"
+        assert captured["responses_model"] == "gpt-5.5"
+        assert captured["size"] == "1024x1024"
+        assert captured["reference_image_data_urls"] == []
+
+    def test_generate_via_responses_passes_reference_image_bytes(self, provider, monkeypatch, tmp_path):
+        monkeypatch.setenv("OPENAI_IMAGE_API_MODE", "responses")
+        captured = {}
+
+        ref = tmp_path / "reference.png"
+        ref.write_bytes(bytes.fromhex(_PNG_HEX))
+
+        def _collect(**kwargs):
+            captured.update(kwargs)
+            return _b64_png()
+
+        monkeypatch.setattr(openai_plugin, "_collect_responses_image_b64", _collect)
+
+        result = provider.generate(
+            "make the reference image cinematic",
+            aspect_ratio="square",
+            reference_image_paths=[str(ref)],
+        )
+
+        assert result["success"] is True
+        assert result["reference_image_count"] == 1
+        assert captured["reference_image_data_urls"][0].startswith("data:image/png;base64,")
 
     @pytest.mark.parametrize("tier,expected_quality", [
         ("gpt-image-2-low", "low"),
@@ -195,6 +308,30 @@ class TestGenerate:
             provider.generate("a cat", aspect_ratio=aspect)
 
         assert fake_client.images.generate.call_args.kwargs["size"] == expected_size
+
+    def test_reference_image_uses_images_edit(self, provider, tmp_path):
+        ref = tmp_path / "reference.png"
+        ref.write_bytes(bytes.fromhex(_PNG_HEX))
+        fake_client = MagicMock()
+        fake_client.images.edit.return_value = _fake_response(b64=_b64_png())
+
+        with _patched_openai(fake_client):
+            result = provider.generate(
+                "edit the reference image",
+                aspect_ratio="portrait",
+                reference_image_paths=[str(ref)],
+            )
+
+        assert result["success"] is True
+        assert result["api_action"] == "edit"
+        assert result["reference_image_count"] == 1
+        fake_client.images.generate.assert_not_called()
+        call_kwargs = fake_client.images.edit.call_args.kwargs
+        assert call_kwargs["model"] == "gpt-image-2"
+        assert call_kwargs["quality"] == "medium"
+        assert call_kwargs["size"] == "1024x1536"
+        assert call_kwargs["input_fidelity"] == "high"
+        assert call_kwargs["image"].name == str(ref.resolve())
 
     def test_revised_prompt_passed_through(self, provider):
         fake_client = MagicMock()
@@ -269,3 +406,44 @@ class TestGenerate:
 
         assert result["success"] is True
         assert result["image"] == "https://example.com/img.png"
+
+    def test_responses_payload_shape(self):
+        payload = openai_plugin._build_responses_payload(
+            prompt="a cat",
+            responses_model="gpt-5.5",
+            api_model="image-2",
+            size="1024x1024",
+            quality="low",
+        )
+        assert payload["model"] == "gpt-5.5"
+        assert payload["stream"] is False
+        tool = payload["tools"][0]
+        assert tool["type"] == "image_generation"
+        assert tool["model"] == "image-2"
+        assert tool["quality"] == "low"
+        assert payload["tool_choice"]["tools"] == [{"type": "image_generation"}]
+
+    def test_responses_payload_includes_reference_images(self):
+        data_url = "data:image/png;base64,QUFB"
+        payload = openai_plugin._build_responses_payload(
+            prompt="edit this",
+            responses_model="gpt-5.5",
+            api_model="image-2",
+            size="1024x1024",
+            quality="low",
+            reference_image_data_urls=[data_url],
+        )
+        content = payload["input"][0]["content"]
+        assert content == [
+            {"type": "input_text", "text": "edit this"},
+            {"type": "input_image", "image_url": data_url},
+        ]
+
+    def test_extract_image_b64_from_responses_payload(self):
+        payload = {
+            "output": [{
+                "type": "image_generation_call",
+                "result": "abc",
+            }]
+        }
+        assert openai_plugin._extract_image_b64(payload) == "abc"

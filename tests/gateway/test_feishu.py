@@ -1953,6 +1953,55 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertEqual(event.reply_to_text, "父消息内容")
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_process_inbound_message_attaches_referenced_media(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import MessageType
+        from gateway.platforms.feishu import FeishuAdapter, FeishuMessageContext
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._dispatch_inbound_event = AsyncMock()
+        adapter.get_chat_info = AsyncMock(
+            return_value={"chat_id": "oc_chat", "name": "Feishu DM", "type": "dm"}
+        )
+        adapter._resolve_sender_profile = AsyncMock(
+            return_value={"user_id": "ou_user", "user_name": "张三", "user_id_alt": None}
+        )
+        adapter._fetch_message_context = AsyncMock(
+            return_value=FeishuMessageContext(
+                text="[Image]",
+                media_urls=["/tmp/quoted-image.jpg"],
+                media_types=["image/jpeg"],
+            )
+        )
+        message = SimpleNamespace(
+            chat_id="oc_chat",
+            thread_id=None,
+            parent_id="om_parent_image",
+            upper_message_id=None,
+            message_type="text",
+            content='{"text":"帮我修改这张图"}',
+            message_id="om_reply",
+        )
+
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=SimpleNamespace(event=SimpleNamespace(message=message)),
+                message=message,
+                sender_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+                is_bot=False,
+                chat_type="p2p",
+                message_id="om_reply",
+            )
+        )
+
+        event = adapter._dispatch_inbound_event.await_args.args[0]
+        self.assertEqual(event.message_type, MessageType.TEXT)
+        self.assertEqual(event.reply_to_message_id, "om_parent_image")
+        self.assertEqual(event.reply_to_text, "[Image]")
+        self.assertEqual(event.media_urls, ["/tmp/quoted-image.jpg"])
+        self.assertEqual(event.media_types, ["image/jpeg"])
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_send_replies_in_thread_when_thread_metadata_present(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
@@ -4681,6 +4730,28 @@ class TestFeishuFetchMessageText(unittest.TestCase):
         # The rendered text should still have the bot name substituted.
         result = asyncio.run(adapter._fetch_message_text("m_parent"))
         self.assertEqual(result, "@Hermes hi")
+
+    def test_fetch_message_context_downloads_image_media(self):
+        adapter = self._build_adapter()
+        adapter._download_feishu_message_resources = AsyncMock(
+            return_value=(["/tmp/parent-image.jpg"], ["image/jpeg"])
+        )
+        parent = SimpleNamespace(
+            body=SimpleNamespace(content=json.dumps({"image_key": "img_parent"})),
+            msg_type="image",
+            mentions=None,
+        )
+        response = Mock()
+        response.success = Mock(return_value=True)
+        response.data = SimpleNamespace(items=[parent])
+        adapter._client.im.v1.message.get = Mock(return_value=response)
+
+        result = asyncio.run(adapter._fetch_message_context("m_parent_image"))
+
+        self.assertEqual(result.text, "[Image]")
+        self.assertEqual(result.media_urls, ["/tmp/parent-image.jpg"])
+        self.assertEqual(result.media_types, ["image/jpeg"])
+        adapter._download_feishu_message_resources.assert_awaited_once()
 
     def test_build_mentions_map_string_id_shape(self):
         """_build_mentions_map accepts the reply-history shape (id as str +

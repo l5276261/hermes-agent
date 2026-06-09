@@ -26,7 +26,7 @@ import os
 import datetime
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # fal_client is imported lazily — see _load_fal_client(). Pulling it
 # eagerly added ~64 ms to every CLI cold start because
@@ -1024,10 +1024,46 @@ IMAGE_GENERATE_SCHEMA = {
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
             },
+            "reference_image_paths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional local image file paths to use as real visual "
+                    "references when editing or regenerating from user-uploaded "
+                    "images. Pass the exact local path(s) shown in the message "
+                    "context, not a textual description. Supported backends "
+                    "will upload the image bytes; unsupported backends may "
+                    "ignore this field."
+                ),
+            },
         },
         "required": ["prompt"],
     },
 }
+
+
+def _normalize_reference_image_paths_arg(value: Any) -> List[str]:
+    """Normalize tool-supplied reference image paths into a small string list."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, (list, tuple)):
+        candidates = list(value)
+    else:
+        return []
+
+    paths: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        path = candidate.strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths[:16]
 
 
 def _read_configured_image_model():
@@ -1069,7 +1105,11 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _dispatch_to_plugin_provider(
+    prompt: str,
+    aspect_ratio: str,
+    reference_image_paths: Optional[List[str]] = None,
+):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -1126,6 +1166,8 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
         kwargs = {"prompt": prompt, "aspect_ratio": aspect_ratio}
         if configured_model:
             kwargs["model"] = configured_model
+        if reference_image_paths:
+            kwargs["reference_image_paths"] = reference_image_paths
         result = provider.generate(**kwargs)
     except Exception as exc:
         logger.warning(
@@ -1153,11 +1195,14 @@ def _handle_image_generate(args, **kw):
     if not prompt:
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
+    reference_image_paths = _normalize_reference_image_paths_arg(
+        args.get("reference_image_paths") or args.get("reference_image_path")
+    )
     task_id = kw.get("task_id")
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio, reference_image_paths)
     if dispatched is not None:
         return _postprocess_image_generate_result(dispatched, task_id=task_id)
 
