@@ -51,6 +51,8 @@ def _source():
 class TestDirectImageEditShortcut(unittest.TestCase):
     def test_image_edit_intent_requires_generation_or_edit_language(self):
         self.assertTrue(GatewayRunner._message_requests_image_edit("帮我改一下这张图"))
+        self.assertTrue(GatewayRunner._message_requests_image_edit("没有温柔地看镜头，重改"))
+        self.assertTrue(GatewayRunner._message_requests_image_edit("再改一下，改图"))
         self.assertTrue(GatewayRunner._message_requests_image_edit("make this look cinematic"))
         self.assertFalse(GatewayRunner._message_requests_image_edit("你能看到这张图吗"))
         self.assertFalse(GatewayRunner._message_requests_image_edit("这张图里是什么"))

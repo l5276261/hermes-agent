@@ -69,7 +69,7 @@ _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-
 
 _IMAGE_EDIT_INTENT_RE = re.compile(
     r"("
-    r"改一下|修改|改成|改为|换成|变成|修图|p图|P图|重绘|重新画|"
+    r"改一下|修改|改成|改为|重改|再改|重新改|改图|修一下|换成|变成|修图|p图|P图|重绘|重新画|"
     r"生成|出图|做成|画成|加上|去掉|替换|换背景|换风格|"
     r"edit|modify|change|turn\s+.*\s+into|make\s+.*\s+look|generate|redraw"
     r")",
